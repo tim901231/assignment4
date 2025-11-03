@@ -39,12 +39,11 @@ def optimize_an_image(
     for i in tqdm(range(total_iter)):
         optimizer.zero_grad()
         # Forward pass to compute the loss
-        
         ### YOUR CODE HERE ###
         if args.sds_guidance:
-            loss = 
+            loss = sds.sds_loss(latents, embeddings['default'], text_embeddings_uncond=embeddings['uncond'])
         else:
-            loss = 
+            loss = sds.sds_loss(latents, embeddings['default'])
 
         # Backward pass
         loss.backward()

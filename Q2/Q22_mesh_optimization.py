@@ -19,6 +19,12 @@ from utils import (
     seed_everything,
 )
 
+import random
+from pytorch3d.renderer import (
+    FoVPerspectiveCameras,
+    PointLights,
+    look_at_view_transform,
+)
 
 def optimize_mesh_texture(
     sds,
@@ -95,11 +101,17 @@ def optimize_mesh_texture(
 
         # Forward pass
         # Render a randomly sampled camera view to optimize in this iteration
-        rend = 
+        R, T = look_at_view_transform(3, 0, random.uniform(0, 360))
+        cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
+
+        # Place a point light in front of the cow.
+        lights = PointLights(location=[[0, 0, -3]], device=device)
+
+        rend = renderer(mesh, cameras=cameras, lights=lights)[..., :3].permute(0, 3, 1, 2)
         # Encode the rendered image to latents
-        latents = 
+        latents = sds.encode_imgs(rend)
         # Compute the loss
-        loss =
+        loss = sds.sds_loss(latents, embeddings['default'], embeddings['uncond'])
 
 
 

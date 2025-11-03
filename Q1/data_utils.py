@@ -210,5 +210,41 @@ def colours_from_spherical_harmonics(spherical_harmonics, gaussian_dirs):
                                     RGB colour.
     """
     ### YOUR CODE HERE ###
-    colours = None
-    return colours
+    SH_C0 = 0.28209479177387814
+    SH_C1 = 0.4886025119029199
+    SH_C2_0 = 1.0925484305920792
+    SH_C2_1 = -1.0925484305920792
+    SH_C2_2 = 0.31539156525252005
+    SH_C2_3 = -1.0925484305920792
+    SH_C2_4 = 0.5462742152960396
+    SH_C3_0 = -0.5900435899266435
+    SH_C3_1 = 2.890611442640554
+    SH_C3_2 = -0.4570457994644658
+    SH_C3_3 = 0.3731763325901154
+    SH_C3_4 = -0.4570457994644658
+    SH_C3_5 = 1.445305721320277
+    SH_C3_6 = -0.5900435899266435
+
+    colours = SH_C0 * spherical_harmonics[:, :3]
+    x = gaussian_dirs[:, 0:1]
+    y = gaussian_dirs[:, 1:2]
+    z = gaussian_dirs[:, 2:]
+    
+    colours = colours + SH_C1 * (-1 * y * spherical_harmonics[:, 3:6] + z * spherical_harmonics[:, 6:9] - x * spherical_harmonics[:, 9:12])
+    
+    (xx, yy, zz) = (x * x, y * y, z * z)
+    (xy, yz, xz) = (x * y, y * z, x * z)
+
+    colours = colours + SH_C2_0 * xy * spherical_harmonics[:, 12:15] + SH_C2_1 * yz * spherical_harmonics[:, 15:18] \
+        + SH_C2_2 * (2.0 * zz - xx - yy) * spherical_harmonics[:, 18:21] + SH_C2_3 * xz * spherical_harmonics[:, 21:24] + SH_C2_4 * (xx - yy) * spherical_harmonics[:, 24:27]
+
+    colours = colours \
+        + SH_C3_0 * y * (3.0 * xx - yy) * spherical_harmonics[:, 27:30] \
+        + SH_C3_1 * xy * z * spherical_harmonics[:, 30:33] \
+        + SH_C3_2 * y * (4.0 * zz - xx - yy) * spherical_harmonics[:, 33:36] \
+        + SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * spherical_harmonics[:, 36:39] \
+        + SH_C3_4 * x * (4.0 * zz - xx - yy) * spherical_harmonics[:, 39:42] \
+        + SH_C3_5 * z * (xx - yy) * spherical_harmonics[:, 42:45] \
+        + SH_C3_6 * x * (xx - 3.0 * yy) * spherical_harmonics[:, 45:48]
+
+    return torch.clip(colours+0.5, 0.0, 1.0)
