@@ -16,3 +16,17 @@ SSIM
 [*] Evaluation --- Mean PSNR: 17.216
 [*] Evaluation --- Mean SSIM: 0.647
 
+
+train long
+
+[*] Evaluation --- Mean PSNR: 18.846
+[*] Evaluation --- Mean SSIM: 0.726
+
+
+result 
+
+[*] Evaluation --- Mean PSNR: 22.479
+[*] Evaluation --- Mean SSIM: 0.693
+
+ffmpeg -i rgb_ep_99.mp4 -vf "fps=10,scale=128:-1:flags=lanczos" rgb_ep_99.gif
+ffmpeg -i depth_ep_99.mp4 -vf "fps=10,scale=128:-1:flags=lanczos" depth_ep_99.gif

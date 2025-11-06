@@ -16,6 +16,69 @@ from SDS import SDS
 from utils import prepare_embeddings, seed_everything
 
 import torch.nn.functional as F
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../Q1")))
+from model import Scene, Gaussians
+
+def _tensor_size(t):
+    return t.size()[1] * t.size()[2] * t.size()[3]
+
+def tv_loss(x):
+    batch_size = x.size()[0]
+    h_x = x.size()[2]
+    w_x = x.size()[3]
+    count_h = _tensor_size(x[:, :, 1:, :])
+    count_w = _tensor_size(x[:, :, :, 1:])
+    h_tv = torch.pow((x[:, :, 1:, :] - x[:, :, : h_x - 1, :]), 2).sum()
+    w_tv = torch.pow((x[:, :, :, 1:] - x[:, :, :, : w_x - 1]), 2).sum()
+    return 2 * (h_tv / count_h + w_tv / count_w) / batch_size
+
+def get_expon_lr_func(lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=100000):
+    def helper(step):
+        if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+            return 0.0
+        if lr_delay_steps > 0:
+            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
+                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
+            )
+        else:
+            delay_rate = 1.0
+        t = np.clip(step / max_steps, 0, 1)
+        log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
+        return delay_rate * log_lerp
+    return helper
+
+def make_trainable(gaussians):
+
+    ### YOUR CODE HERE ###
+    # HINT: You can access and modify parameters from gaussians
+    gaussians.means.requires_grad_(True)
+    gaussians.pre_act_scales.requires_grad_(True)
+    gaussians.colours.requires_grad_(True)
+    gaussians.pre_act_opacities.requires_grad_(True)
+    gaussians.pre_act_quats.requires_grad_(True)
+
+def setup_optimizer(gaussians):
+
+    gaussians.check_if_trainable()
+
+    ### YOUR CODE HERE ###
+    # HINT: Modify the learning rates to reasonable values. We have intentionally
+    # set very high learning rates for all parameters.
+    # HINT: Consider reducing the learning rates for parameters that seem to vary too
+    # fast with the default settings.
+    # HINT: Consider setting different learning rates for different sets of parameters.
+    parameters = [
+        {'params': [gaussians.pre_act_opacities], 'lr': 0.025, "name": "opacities"},
+        {'params': [gaussians.pre_act_scales], 'lr': 0.005, "name": "scales"},
+        {'params': [gaussians.colours], 'lr': 0.0025, "name": "colours"},
+        {'params': [gaussians.means], 'lr': 1.6e-4, "name": "means"},
+        {'params': [gaussians.pre_act_quats], 'lr': 1e-3, "name": "quats"},
+    ]
+    optimizer = torch.optim.Adam(parameters, lr=0.0, eps=1e-15)
+    # optimizer = None
+
+    return optimizer
 
 def optimize_nerf(
     sds,
@@ -33,21 +96,34 @@ def optimize_nerf(
     embeddings = prepare_embeddings(sds, prompt, neg_prompt, view_dependent=True)
 
     # Step 2. Set up NeRF model
-    model = NeRFNetwork(args).to(device)
+    # model = NeRFNetwork(args).to(device)
+
+    gaussians = Gaussians(
+        num_points=2000, init_type="random",
+        device="cuda", isotropic=False
+    )
+
+    parameters = [
+        {'params': [gaussians.pre_act_opacities], 'lr': 0.05, "name": "opacities"},
+        {'params': [gaussians.pre_act_scales], 'lr': 0.005, "name": "scales"},
+        {'params': [gaussians.colours], 'lr': 0.01, "name": "colours"},
+        {'params': [gaussians.means], 'lr': 1.6e-4, "name": "means"},
+        {'params': [gaussians.pre_act_quats], 'lr': 5e-3, "name": "quats"},
+    ]
+    param_list = [p for group in parameters for p in group['params']]
+
+    scene = Scene(gaussians)
+    means_lr_schedule = get_expon_lr_func(
+        lr_init=1e-3,     # base learning rate
+        lr_final=2e-5,    # target at the end of training
+        lr_delay_mult=0.01,   # start at 1% of lr_init
+        max_steps=10000
+    )
 
     # Step 3. Create optimizer and training parameters
-    lr = 1e-3
-    optimizer = Adan(
-        model.parameters(),
-        lr=5 * lr,
-        eps=1e-8,
-        weight_decay=2e-5,
-        max_grad_norm=5.0,
-        foreach=False,
-    )
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 1)
-    if args.loss_scaling:
-        scaler = torch.cuda.amp.GradScaler()
+    # Making gaussians trainable and setting up optimizer
+    make_trainable(gaussians)
+    optimizer = setup_optimizer(gaussians)
 
     # Step 4. Load the dataset
     train_loader = NeRFDataset(
@@ -75,81 +151,22 @@ def optimize_nerf(
     os.makedirs(f"{sds.output_dir}/images", exist_ok=True)
     os.makedirs(f"{sds.output_dir}/videos", exist_ok=True)
 
+    # tv_loss = torchmetrics.TotalVariation().to(device="cuda")
+
     max_epoch = np.ceil(args.iters / len(train_loader)).astype(np.int32)
     for epoch in range(max_epoch):
-        model.train()
         for data in train_loader:
             global_step += 1
+            # print(data.keys())
+            # print(data['H'])
 
             # Initialize optimizer
             optimizer.zero_grad()
             # experiment iterations ratio
             # i.e. what proportion of this experiment have we completed (in terms of iterations) so far?
-            exp_iter_ratio = (global_step - args.exp_start_iter) / (
-                args.exp_end_iter - args.exp_start_iter
-            )
 
-            # Load the data
-            rays_o = data["rays_o"]  # [B, N, 3]
-            rays_d = data["rays_d"]  # [B, N, 3]
-            mvp = data["mvp"]  # [B, 4, 4]
-
-            B, N = rays_o.shape[:2]
-            H, W = data["H"], data["W"]
-            assert B == 1, "Batch size should be 1"
-
-            # When ref_data has B images > args.batch_size
-            if B > args.batch_size:
-                # choose batch_size images out of those B images
-                choice = torch.randperm(B)[: args.batch_size]
-                B = args.batch_size
-                rays_o = rays_o[choice]
-                rays_d = rays_d[choice]
-                mvp = mvp[choice]
-
-            # Set the shading and background color for rendering
-            if exp_iter_ratio <= args.latent_iter_ratio:
-                ambient_ratio = 1.0
-                shading = "normal"
-                bg_color = None
-
-            else:
-                # random shading
-                ambient_ratio = (
-                    args.min_ambient_ratio
-                    + (1.0 - args.min_ambient_ratio) * random.random()
-                )
-                rand = random.random()
-                if rand >= (1.0 - args.textureless_ratio):
-                    shading = "textureless"
-                else:
-                    shading = "lambertian"
-
-                # random background
-                rand = random.random()
-                if args.bg_radius > 0 and rand > 0.5:
-                    bg_color = None  # use bg_net
-                else:
-                    bg_color = torch.rand(3).to(device)  # single color random bg
-
-            # Forward pass to render NeRF model
-            outputs = model.render(
-                rays_o,
-                rays_d,
-                mvp,
-                H,
-                W,
-                staged=False,
-                perturb=True,
-                bg_color=bg_color,
-                ambient_ratio=ambient_ratio,
-                shading=shading,
-                binarize=False,
-                max_ray_batch=args.max_ray_batch,
-            )
-            pred_rgb = (
-                outputs["image"].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
-            )  # [B, 3, H, W]
+            pred_rgb = scene.render(data['cameras'], per_splat=args.gaussians_per_splat, \
+                img_size=(128, 128), bg_colour=(0.0, 0.0, 0.0))[0].permute(2, 0, 1).unsqueeze(0)
 
             # Compuate the loss
             # interpolate text_z
@@ -176,35 +193,28 @@ def optimize_nerf(
             # print(pred_rgb.shape)
             if not args.pixel_space_sds:
                 latents = sds.encode_imgs(F.interpolate(pred_rgb, (512, 512), mode='bilinear', align_corners=False))
-                loss = sds.sds_loss(latents, text_cond, text_embeddings_uncond=text_uncond)
+                loss = 0.1 * sds.sds_loss(latents, text_cond, text_embeddings_uncond=text_uncond)
             else:
-                loss = sds.pixel_sds_loss(F.interpolate(pred_rgb, (512, 512), mode='bilinear', align_corners=False), text_cond, text_embeddings_uncond=text_uncond)
+                loss = 0.1 * sds.pixel_sds_loss(F.interpolate(pred_rgb, (512, 512), mode='bilinear', align_corners=False), text_cond, text_embeddings_uncond=text_uncond)
 
-            # regularizations
-            if args.lambda_entropy > 0:
-                alphas = outputs["weights"].clamp(1e-5, 1 - 1e-5)
-                # alphas = alphas ** 2 # skewed entropy, favors 0 over 1
-                loss_entropy = (
-                    -alphas * torch.log2(alphas) - (1 - alphas) * torch.log2(1 - alphas)
-                ).mean()
-                lambda_entropy = args.lambda_entropy * min(
-                    1, 2 * global_step / args.iters
-                )
-                loss = loss + lambda_entropy * loss_entropy
+            # print(pred_rgb.shape)
+            loss += tv_loss(pred_rgb)
+            # loss += 0.1 * (gaussians.colours - 0.5).pow(2).mean()
 
-            if args.lambda_orient > 0 and "loss_orient" in outputs:
-                loss_orient = outputs["loss_orient"]
-                loss = loss + args.lambda_orient * loss_orient
+            loss.backward()
+            lr_means = means_lr_schedule(global_step)
+            for group in optimizer.param_groups:
+                if group["name"] == "means":
+                    group["lr"] = lr_means
 
-            # Backward pass
-            if args.loss_scaling:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-            lr_scheduler.step()
+            # max_grad_norm = max(p.grad.norm() for p in param_list if p.grad is not None)
+            # print("Max grad norm:", max_grad_norm)
+            # print("opacity", torch.max(gaussians.pre_act_opacities))
+            # print("color", torch.max(gaussians.colours))
+
+            torch.nn.utils.clip_grad_norm_(param_list, 2.0)
+            
+            optimizer.step()
 
             # Log
             print(f"Epoch {epoch}, global_step {global_step}, loss {loss.item()}")
@@ -221,19 +231,8 @@ def optimize_nerf(
                 )
                 rgb.save(output_path)
 
-        # Save checkpoint
-        if epoch % log_interval == 0 and global_step > 0:
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch,
-                },
-                checkpoint_path,
-            )
 
         if epoch % log_interval == 0 or epoch == max_epoch - 1:
-            model.eval()
             all_preds = []
             all_preds_depth = []
 
@@ -241,43 +240,15 @@ def optimize_nerf(
 
             with torch.no_grad():
                 for i, data in enumerate(test_loader):
-                    rays_o = data["rays_o"]  # [B, N, 3]
-                    rays_d = data["rays_d"]  # [B, N, 3]
-                    mvp = data["mvp"]
+                    
 
-                    B, N = rays_o.shape[:2]
-                    H, W = data["H"], data["W"]
+                    preds, preds_depth, _ = scene.render(data['cameras'], per_splat=args.gaussians_per_splat, \
+                        img_size=(128, 128), bg_colour=(0.0, 0.0, 0.0))
 
-                    if bg_color is not None:
-                        bg_color = bg_color.to(rays_o.device)
-
-                    shading = data["shading"] if "shading" in data else "albedo"
-                    ambient_ratio = (
-                        data["ambient_ratio"] if "ambient_ratio" in data else 1.0
-                    )
-                    light_d = data["light_d"] if "light_d" in data else None
-
-                    outputs = model.render(
-                        rays_o,
-                        rays_d,
-                        mvp,
-                        H,
-                        W,
-                        staged=True,
-                        perturb=False,
-                        light_d=light_d,
-                        ambient_ratio=ambient_ratio,
-                        shading=shading,
-                        bg_color=bg_color,
-                    )
-
-                    preds = outputs["image"].reshape(B, H, W, 3)
-                    preds_depth = outputs["depth"].reshape(B, H, W)
-
-                    pred = preds[0].detach().cpu().numpy()
+                    pred = preds.detach().cpu().numpy()
                     pred = (pred * 255).astype(np.uint8)
 
-                    pred_depth = preds_depth[0].detach().cpu().numpy()
+                    pred_depth = preds_depth.detach().cpu().numpy()
                     pred_depth = (pred_depth - pred_depth.min()) / (
                         pred_depth.max() - pred_depth.min() + 1e-6
                     )
@@ -334,6 +305,18 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help="option to pixel space sds for nerf optimization",
+    )
+    parser.add_argument(
+        "--gaussians_per_splat", default=-1, type=int,
+        help=(
+            "Number of gaussians to splat in one function call. If set to -1, "
+            "then all gaussians in the scene are splat in a single function call. "
+            "If set to any other positive interger, then it determines the number of "
+            "gaussians to splat per function call (the last function call might splat "
+            "lesser number of gaussians). In general, the algorithm can run faster "
+            "if more gaussians are splat per function call, but at the cost of higher GPU "
+            "memory consumption."
+        )
     )
 
     parser = add_config_arguments(
